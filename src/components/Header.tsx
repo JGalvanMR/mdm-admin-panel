@@ -1,79 +1,78 @@
 import { useLocation } from 'react-router-dom';
-import { Bell, RefreshCw } from 'lucide-react';
+import { RefreshCw, Radio } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import api, { WsStatus } from '../services/api';
 
-const pageTitles: Record<string, string> = {
-  '/': 'Dashboard',
+const PAGE_TITLES: Record<string, string> = {
+  '/':            'Dashboard',
   '/dispositivos': 'Dispositivos',
-  '/comandos': 'Enviar Comandos',
-  '/actividad': 'Actividad',
+  '/comandos':    'Enviar Comandos',
+  '/actividad':   'Actividad',
 };
 
 export default function Header() {
   const location = useLocation();
-  const title = pageTitles[location.pathname] || 'MDM Admin';
-  const [wsStatus, setWsStatus] = useState<WsStatus | null>(null);
-  const [lastUpdate, setLastUpdate] = useState(new Date());
 
-  useEffect(() => {
-    const fetchWsStatus = async () => {
-      const response = await api.getWsStatus();
-      if (response.success && response.data) {
-        setWsStatus(response.data);
-        setLastUpdate(new Date());
-      }
-    };
+  // Resolver título incluso en rutas dinámicas como /dispositivos/:id
+  const title = PAGE_TITLES[location.pathname]
+    ?? (location.pathname.startsWith('/dispositivos/') ? 'Detalle de Dispositivo' : 'MDM Admin');
 
-    fetchWsStatus();
-    const interval = setInterval(fetchWsStatus, 30000);
-    return () => clearInterval(interval);
-  }, []);
+  const [wsStatus,    setWsStatus]    = useState<WsStatus | null>(null);
+  const [lastUpdate,  setLastUpdate]  = useState(new Date());
+  const [refreshing,  setRefreshing]  = useState(false);
 
-  const formatTime = (date: Date) => {
-    return date.toLocaleTimeString('es-ES', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
+  const fetchWs = async () => {
+    const res = await api.getWsStatus();
+    if (res.success && res.data) {
+      setWsStatus(res.data);
+      setLastUpdate(new Date());
+    }
   };
 
+  useEffect(() => {
+    fetchWs();
+    const iv = setInterval(fetchWs, 30_000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await fetchWs();
+    setTimeout(() => {
+      setRefreshing(false);
+      window.location.reload();
+    }, 300);
+  };
+
+  const online = wsStatus?.onlineViaWebSocket ?? 0;
+
   return (
-    <header className="h-16 bg-gray-900 border-b border-gray-800 px-6 flex items-center justify-between">
+    <header className="h-16 bg-gray-900 border-b border-gray-800 px-6 flex items-center justify-between flex-shrink-0">
       <div>
-        <h2 className="text-xl font-bold text-white">{title}</h2>
-        <p className="text-xs text-gray-500">
-          Última actualización: {formatTime(lastUpdate)}
+        <h2 className="text-lg font-bold text-white leading-tight">{title}</h2>
+        <p className="text-xs text-gray-600">
+          Actualizado: {lastUpdate.toLocaleTimeString('es-ES')}
         </p>
       </div>
 
-      <div className="flex items-center gap-4">
-        {/* WebSocket Status */}
+      <div className="flex items-center gap-3">
+
+        {/* Indicador WebSocket */}
         <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 rounded-lg">
-          <div
-            className={`w-2 h-2 rounded-full ${(wsStatus?.onlineViaWebSocket || 0) > 0
-                ? 'bg-emerald-400 animate-pulse'
-                : 'bg-gray-500'
-              }`}
-          />
-          <span className="text-sm text-gray-400">
-            {wsStatus?.onlineViaWebSocket || 0} WS activos
+          <Radio className={`w-3.5 h-3.5 ${online > 0 ? 'text-emerald-400' : 'text-gray-500'}`} />
+          <div className={`w-1.5 h-1.5 rounded-full ${online > 0 ? 'bg-emerald-400 animate-pulse' : 'bg-gray-600'}`} />
+          <span className="text-xs text-gray-400">
+            {online} WS {online === 1 ? 'activo' : 'activos'}
           </span>
         </div>
 
-        {/* Refresh Button */}
+        {/* Botón refresh */}
         <button
-          onClick={() => window.location.reload()}
+          onClick={handleRefresh}
+          title="Recargar página"
           className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"
-          title="Actualizar"
         >
-          <RefreshCw className="w-5 h-5" />
-        </button>
-
-        {/* Notifications */}
-        <button className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors relative">
-          <Bell className="w-5 h-5" />
-          <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full" />
+          <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
         </button>
       </div>
     </header>

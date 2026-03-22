@@ -1,297 +1,242 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
-  Activity,
-  Clock,
-  CheckCircle,
-  XCircle,
-  Loader2,
-  RefreshCw,
-  Filter,
-  Terminal,
+  Activity, Clock, CheckCircle, XCircle,
+  Loader2, RefreshCw, Terminal, AlertCircle,
 } from 'lucide-react';
-import api, { Command, PagedResult } from '../services/api';
+import api, { Command } from '../services/api';
+
+type FilterType = 'all' | 'Executed' | 'Failed' | 'Pending' | 'Sent' | 'Cancelled' | 'Expired';
+
+const STATUS_MAP: Record<string, { label: string; color: string; icon: React.ElementType }> = {
+  Executed:  { label: 'Ejecutado',  color: 'text-emerald-400', icon: CheckCircle  },
+  Failed:    { label: 'Fallido',    color: 'text-red-400',     icon: XCircle      },
+  Pending:   { label: 'Pendiente',  color: 'text-amber-400',   icon: Loader2      },
+  Sent:      { label: 'Enviado',    color: 'text-blue-400',    icon: RefreshCw    },
+  Cancelled: { label: 'Cancelado',  color: 'text-gray-400',    icon: XCircle      },
+  Expired:   { label: 'Expirado',   color: 'text-orange-400',  icon: AlertCircle  },
+  Executing: { label: 'Ejecutando', color: 'text-blue-300',    icon: Loader2      },
+};
+
+function StatusBadge({ status }: { status: string }) {
+  const cfg   = STATUS_MAP[status] ?? { label: status, color: 'text-gray-400', icon: Activity };
+  const Icon  = cfg.icon;
+  const spin  = status === 'Pending' || status === 'Executing';
+  return (
+    <div className="flex items-center gap-1.5">
+      <Icon className={`w-4 h-4 ${cfg.color} ${spin ? 'animate-spin' : ''}`} />
+      <span className={`text-sm font-medium ${cfg.color}`}>{cfg.label}</span>
+    </div>
+  );
+}
+
+function fmt(d: string | null) {
+  if (!d) return '—';
+  return new Date(d).toLocaleString('es-ES', {
+    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+}
 
 export default function ActivityPage() {
   const [commands, setCommands] = useState<Command[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<'all' | 'completed' | 'failed' | 'pending'>('all');
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
-  const [stats, setStats] = useState<{ total: number; completed: number; failed: number; pending: number }>({
-    total: 0,
-    completed: 0,
-    failed: 0,
-    pending: 0,
-  });
+  const [loading,  setLoading]  = useState(true);
+  const [error,    setError]    = useState<string | null>(null);
+  const [filter,   setFilter]   = useState<FilterType>('all');
 
-  useEffect(() => {
-    fetchActivity();
-  }, [page]);
+  const stats = {
+    total:     commands.length,
+    executed:  commands.filter(c => c.status === 'Executed').length,
+    failed:    commands.filter(c => c.status === 'Failed').length,
+    pending:   commands.filter(c => c.status === 'Pending' || c.status === 'Sent').length,
+  };
 
-  const fetchActivity = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
-      // Get all devices first to gather command history
-      const devicesRes = await api.getDevices();
-      if (!devicesRes.success || !devicesRes.data) {
-        setError('Error al cargar actividad');
+      const devRes = await api.getDevices();
+      if (!devRes.success || !devRes.data) {
+        setError(devRes.error || 'Error al cargar dispositivos');
         return;
       }
 
-      const allCommands: Command[] = [];
-      let completed = 0;
-      let failed = 0;
-      let pending = 0;
-
-      // Fetch commands for each device
-      const commandPromises = devicesRes.data.devices.slice(0, 20).map(async (device) => {
-        const res = await api.getDeviceCommands(device.deviceId, 1, 5);
-        if (res.success && res.data) {
-          return res.data.items;
-        }
-        return [];
-      });
-
-      const results = await Promise.all(commandPromises);
-      results.forEach((cmds) => {
-        allCommands.push(...cmds);
-        cmds.forEach((cmd) => {
-          const status = cmd.status.toUpperCase();
-          if (status === 'COMPLETED' || status === 'SUCCESS') completed++;
-          else if (status === 'FAILED' || status === 'ERROR') failed++;
-          else pending++;
-        });
-      });
-
-      setStats({
-        total: allCommands.length,
-        completed,
-        failed,
-        pending,
-      });
-
-      // Sort by creation date
-      allCommands.sort((a, b) =>
-        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      // Obtener hasta 10 comandos de cada dispositivo (máx 30 dispositivos)
+      const deviceSlice = devRes.data.devices.slice(0, 30);
+      const results = await Promise.allSettled(
+        deviceSlice.map(d => api.getDeviceCommands(d.deviceId, 1, 10))
       );
 
-      setCommands(allCommands);
-    } catch (err) {
+      const all: Command[] = [];
+      for (const r of results) {
+        if (r.status === 'fulfilled' && r.value.success && r.value.data) {
+          all.push(...r.value.data.items);
+        }
+      }
+
+      // Ordenar por fecha de creación descendente
+      all.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setCommands(all);
+    } catch {
       setError('Error de conexión');
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const filteredCommands = commands.filter((cmd) => {
-    if (filter === 'all') return true;
-    const status = cmd.status.toUpperCase();
-    if (filter === 'completed') return status === 'COMPLETED' || status === 'SUCCESS';
-    if (filter === 'failed') return status === 'FAILED' || status === 'ERROR';
-    if (filter === 'pending') return status === 'PENDING' || status === 'QUEUED' || status === 'SENT';
-    return true;
-  });
+  useEffect(() => { load(); }, [load]);
 
-  const getStatusIcon = (status: string) => {
-    const s = status.toUpperCase();
-    if (s === 'COMPLETED' || s === 'SUCCESS') {
-      return <CheckCircle className="w-4 h-4 text-emerald-400" />;
-    }
-    if (s === 'FAILED' || s === 'ERROR') {
-      return <XCircle className="w-4 h-4 text-red-400" />;
-    }
-    if (s === 'PENDING' || s === 'QUEUED') {
-      return <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />;
-    }
-    return <RefreshCw className="w-4 h-4 text-blue-400" />;
-  };
+  const filtered = filter === 'all'
+    ? commands
+    : commands.filter(c => c.status === filter);
 
-  const getStatusColor = (status: string) => {
-    const s = status.toUpperCase();
-    if (s === 'COMPLETED' || s === 'SUCCESS') return 'text-emerald-400';
-    if (s === 'FAILED' || s === 'ERROR') return 'text-red-400';
-    if (s === 'PENDING' || s === 'QUEUED') return 'text-amber-400';
-    return 'text-blue-400';
-  };
-
-  const formatDate = (dateString: string | null) => {
-    if (!dateString) return '-';
-    return new Date(dateString).toLocaleString('es-ES', {
-      day: '2-digit',
-      month: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
+  const filters: { key: FilterType; label: string }[] = [
+    { key: 'all',       label: 'Todos'      },
+    { key: 'Executed',  label: 'Ejecutados' },
+    { key: 'Failed',    label: 'Fallidos'   },
+    { key: 'Pending',   label: 'Pendientes' },
+    { key: 'Sent',      label: 'Enviados'   },
+    { key: 'Cancelled', label: 'Cancelados' },
+    { key: 'Expired',   label: 'Expirados'  },
+  ];
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+
+      {/* Encabezado */}
+      <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Actividad</h1>
-          <p className="text-sm text-gray-400 mt-1">
-            Historial de comandos ejecutados
-          </p>
+          <p className="text-sm text-gray-400 mt-1">Historial de comandos de todos los dispositivos</p>
         </div>
         <button
-          onClick={fetchActivity}
-          className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors"
+          onClick={load}
+          className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700
+            text-gray-300 rounded-lg transition-colors"
         >
-          <RefreshCw className="w-4 h-4" />
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           <span>Actualizar</span>
         </button>
       </div>
 
-      {/* Stats */}
+      {/* Stats rápidas */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard
-          label="Total"
-          value={stats.total}
-          icon={Activity}
-          color="text-blue-400"
-          bgColor="bg-blue-500/20"
-        />
-        <StatCard
-          label="Completados"
-          value={stats.completed}
-          icon={CheckCircle}
-          color="text-emerald-400"
-          bgColor="bg-emerald-500/20"
-        />
-        <StatCard
-          label="Fallidos"
-          value={stats.failed}
-          icon={XCircle}
-          color="text-red-400"
-          bgColor="bg-red-500/20"
-        />
-        <StatCard
-          label="Pendientes"
-          value={stats.pending}
-          icon={Loader2}
-          color="text-amber-400"
-          bgColor="bg-amber-500/20"
-        />
+        {[
+          { label: 'Total',       value: stats.total,    color: 'text-blue-400',    bg: 'bg-blue-500/20',    icon: Activity    },
+          { label: 'Ejecutados',  value: stats.executed, color: 'text-emerald-400', bg: 'bg-emerald-500/20', icon: CheckCircle },
+          { label: 'Fallidos',    value: stats.failed,   color: 'text-red-400',     bg: 'bg-red-500/20',     icon: XCircle     },
+          { label: 'Pendientes',  value: stats.pending,  color: 'text-amber-400',   bg: 'bg-amber-500/20',   icon: Loader2     },
+        ].map(({ label, value, color, bg, icon: Icon }) => (
+          <div key={label} className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+            <div className="flex items-center gap-3">
+              <div className={`p-2 rounded-lg ${bg}`}>
+                <Icon className={`w-5 h-5 ${color}`} />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-white">{value}</p>
+                <p className="text-xs text-gray-500">{label}</p>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
 
-      {/* Filters */}
-      <div className="flex gap-2">
-        {(['all', 'completed', 'failed', 'pending'] as const).map((f) => (
+      {/* Filtros */}
+      <div className="flex flex-wrap gap-2">
+        {filters.map(f => (
           <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${filter === f
+            key={f.key}
+            onClick={() => setFilter(f.key)}
+            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+              filter === f.key
                 ? 'bg-emerald-500 text-white'
                 : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-              }`}
+            }`}
           >
-            {f === 'all'
-              ? 'Todos'
-              : f === 'completed'
-                ? 'Completados'
-                : f === 'failed'
-                  ? 'Fallidos'
-                  : 'Pendientes'}
+            {f.label}
           </button>
         ))}
       </div>
 
-      {/* Activity List */}
+      {/* Tabla */}
       {loading && commands.length === 0 ? (
-        <div className="flex items-center justify-center h-64">
+        <div className="flex items-center justify-center h-48">
           <div className="w-8 h-8 border-4 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin" />
         </div>
       ) : error ? (
-        <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-4 text-red-400">
+        <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-4 text-red-400 text-sm">
           {error}
         </div>
-      ) : filteredCommands.length === 0 ? (
+      ) : filtered.length === 0 ? (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
-          <Activity className="w-16 h-16 mx-auto mb-4 text-gray-600" />
-          <h3 className="text-lg font-medium text-gray-400 mb-2">
-            No hay actividad
-          </h3>
-          <p className="text-sm text-gray-500">
-            {filter !== 'all'
-              ? 'No hay comandos con este estado'
-              : 'Aún no se han enviado comandos'}
+          <Activity className="w-14 h-14 mx-auto mb-4 text-gray-700" />
+          <p className="text-gray-400 font-medium">Sin resultados</p>
+          <p className="text-sm text-gray-600 mt-1">
+            {filter !== 'all' ? 'No hay comandos con este estado' : 'Aún no se han enviado comandos'}
           </p>
         </div>
       ) : (
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-gray-800">
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Estado
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Comando
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Dispositivo
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Creado
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Ejecutado
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                    Resultado
-                  </th>
+                <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wider">
+                  <th className="px-4 py-3 text-left">Estado</th>
+                  <th className="px-4 py-3 text-left">Comando</th>
+                  <th className="px-4 py-3 text-left">Dispositivo</th>
+                  <th className="px-4 py-3 text-left">Prioridad</th>
+                  <th className="px-4 py-3 text-left">Creado</th>
+                  <th className="px-4 py-3 text-left">Ejecutado</th>
+                  <th className="px-4 py-3 text-left">Detalle</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredCommands.map((cmd) => (
+                {filtered.map(cmd => (
                   <tr
                     key={`${cmd.id}-${cmd.deviceId}`}
-                    className="border-b border-gray-800 last:border-0 hover:bg-gray-800/50"
+                    className="border-b border-gray-800/60 last:border-0 hover:bg-gray-800/40 transition-colors"
                   >
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        {getStatusIcon(cmd.status)}
-                        <span className={`text-sm font-medium ${getStatusColor(cmd.status)}`}>
-                          {cmd.status}
-                        </span>
-                      </div>
+                      <StatusBadge status={cmd.status} />
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <Terminal className="w-4 h-4 text-gray-500" />
-                        <code className="text-sm text-emerald-400 font-mono">
-                          {cmd.commandType}
-                        </code>
+                        <Terminal className="w-3.5 h-3.5 text-gray-600 flex-shrink-0" />
+                        <code className="text-emerald-400 font-mono text-xs">{cmd.commandType}</code>
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className="text-sm text-gray-300 font-mono">
-                        {cmd.deviceId.substring(0, 12)}...
+                      <span className="text-gray-400 font-mono text-xs">
+                        {cmd.deviceId.substring(0, 16)}…
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-2 text-sm text-gray-500">
-                        <Clock className="w-4 h-4" />
-                        {formatDate(cmd.createdAt)}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-sm text-gray-500">
-                      {formatDate(cmd.executedAt)}
+                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                        cmd.priority <= 3 ? 'bg-red-500/20 text-red-400'
+                        : cmd.priority <= 6 ? 'bg-amber-500/20 text-amber-400'
+                        : 'bg-gray-700 text-gray-400'
+                      }`}>
+                        P{cmd.priority}
+                      </span>
                     </td>
                     <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5 text-gray-500 text-xs">
+                        <Clock className="w-3.5 h-3.5" />
+                        {fmt(cmd.createdAt)}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-500">
+                      {fmt(cmd.executedAt)}
+                    </td>
+                    <td className="px-4 py-3 max-w-[200px]">
                       {cmd.errorMessage ? (
-                        <span className="text-xs text-red-400" title={cmd.errorMessage}>
-                          {cmd.errorMessage.substring(0, 30)}...
+                        <span className="text-xs text-red-400 truncate block" title={cmd.errorMessage}>
+                          {cmd.errorMessage.substring(0, 40)}{cmd.errorMessage.length > 40 ? '…' : ''}
                         </span>
                       ) : cmd.result ? (
-                        <span className="text-xs text-gray-500">
-                          {cmd.result.substring(0, 30)}...
+                        <span className="text-xs text-gray-500 truncate block font-mono" title={cmd.result}>
+                          {cmd.result.substring(0, 40)}{cmd.result.length > 40 ? '…' : ''}
                         </span>
                       ) : (
-                        <span className="text-xs text-gray-500">-</span>
+                        <span className="text-xs text-gray-700">—</span>
                       )}
                     </td>
                   </tr>
@@ -299,36 +244,11 @@ export default function ActivityPage() {
               </tbody>
             </table>
           </div>
+          <div className="px-4 py-3 border-t border-gray-800 text-xs text-gray-600">
+            Mostrando {filtered.length} de {commands.length} comandos
+          </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  icon: Icon,
-  color,
-  bgColor,
-}: {
-  label: string;
-  value: number;
-  icon: React.ElementType;
-  color: string;
-  bgColor: string;
-}) {
-  return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-      <div className="flex items-center gap-3">
-        <div className={`p-2 rounded-lg ${bgColor}`}>
-          <Icon className={`w-5 h-5 ${color}`} />
-        </div>
-        <div>
-          <p className="text-2xl font-bold text-white">{value}</p>
-          <p className="text-xs text-gray-500">{label}</p>
-        </div>
-      </div>
     </div>
   );
 }
