@@ -1,10 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import {
-  Smartphone, Search, RefreshCw, Battery,
-  Wifi, WifiOff, Eye, Terminal, Monitor, Trash2,
-} from 'lucide-react';
-import api, { DeviceListItem } from '../services/api';
+import { Smartphone, Search, RefreshCw, Battery, Wifi, WifiOff, Eye, Terminal, Monitor, Trash2, } from 'lucide-react';
+import api, { DeviceListItem, TelemetrySnapshot, LocationPoint, ScreenshotData } from '../services/api';
+import { Activity, MapPin, Camera, Cpu } from 'lucide-react';
+
 
 type Filter = 'all' | 'online' | 'offline';
 
@@ -22,18 +21,18 @@ function BatteryIndicator({ level }: { level: number | null }) {
 function timeAgo(dateString: string | null): string {
   if (!dateString) return 'Nunca';
   const s = Math.floor((Date.now() - new Date(dateString).getTime()) / 1000);
-  if (s < 60)    return 'Hace un momento';
-  if (s < 3600)  return `Hace ${Math.floor(s / 60)} min`;
+  if (s < 60) return 'Hace un momento';
+  if (s < 3600) return `Hace ${Math.floor(s / 60)} min`;
   if (s < 86400) return `Hace ${Math.floor(s / 3600)} h`;
   return `Hace ${Math.floor(s / 86400)} días`;
 }
 
 export default function DevicesPage() {
-  const [devices,    setDevices]    = useState<DeviceListItem[]>([]);
-  const [loading,    setLoading]    = useState(true);
-  const [error,      setError]      = useState<string | null>(null);
-  const [search,     setSearch]     = useState('');
-  const [filter,     setFilter]     = useState<Filter>('all');
+  const [devices, setDevices] = useState<DeviceListItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState<Filter>('all');
   const [deactivating, setDeactivating] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -76,14 +75,14 @@ export default function DevicesPage() {
       (d.model?.toLowerCase().includes(q) ?? false);
     const matchFilter =
       filter === 'all' ||
-      (filter === 'online'  && d.isOnline) ||
+      (filter === 'online' && d.isOnline) ||
       (filter === 'offline' && !d.isOnline);
     return matchSearch && matchFilter;
   });
 
   const counts = {
-    all:     devices.length,
-    online:  devices.filter(d => d.isOnline).length,
+    all: devices.length,
+    online: devices.filter(d => d.isOnline).length,
     offline: devices.filter(d => !d.isOnline).length,
   };
 
@@ -126,11 +125,10 @@ export default function DevicesPage() {
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                filter === f
-                  ? 'bg-emerald-500 text-white'
-                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-              }`}
+              className={`px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${filter === f
+                ? 'bg-emerald-500 text-white'
+                : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                }`}
             >
               {f === 'all' ? `Todos (${counts.all})` : f === 'online' ? `Online (${counts.online})` : `Offline (${counts.offline})`}
             </button>
@@ -166,9 +164,8 @@ export default function DevicesPage() {
               {/* Cabecera tarjeta */}
               <div className="flex items-start justify-between mb-4">
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 ${
-                    device.isOnline ? 'bg-emerald-500/20' : 'bg-gray-800'
-                  }`}>
+                  <div className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 ${device.isOnline ? 'bg-emerald-500/20' : 'bg-gray-800'
+                    }`}>
                     <Monitor className={`w-5 h-5 ${device.isOnline ? 'text-emerald-400' : 'text-gray-500'}`} />
                   </div>
                   <div className="min-w-0">
@@ -180,11 +177,10 @@ export default function DevicesPage() {
                     </p>
                   </div>
                 </div>
-                <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium flex-shrink-0 ${
-                  device.isOnline
-                    ? 'bg-emerald-500/20 text-emerald-400'
-                    : 'bg-gray-800 text-gray-500'
-                }`}>
+                <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium flex-shrink-0 ${device.isOnline
+                  ? 'bg-emerald-500/20 text-emerald-400'
+                  : 'bg-gray-800 text-gray-500'
+                  }`}>
                   {device.isOnline
                     ? <Wifi className="w-3 h-3" />
                     : <WifiOff className="w-3 h-3" />}
@@ -267,3 +263,4 @@ export default function DevicesPage() {
     </div>
   );
 }
+
