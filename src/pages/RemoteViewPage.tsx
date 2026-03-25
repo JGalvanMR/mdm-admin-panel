@@ -1,424 +1,327 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Link } from 'react-router-dom';
-import {
-  ArrowLeft, Camera, Play, Square, RefreshCw,
-  Maximize2, Download, Clock, Wifi, AlertTriangle,
-  CheckCircle, Loader2,
-} from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
+import { Link } from 'react-router-dom';
+import { ArrowLeft, Wifi, Play, Square, Loader2, AlertTriangle } from 'lucide-react';
 
-// ── Tipos ─────────────────────────────────────────────────────────────────────
-interface DeviceOption {
-  deviceId: string;
-  deviceName: string | null;
-  isOnline: boolean;
-}
-
-interface ScreenshotFrame {
-  base64:    string;
-  sizeKB:    number;
-  takenAt:   Date;
-  commandId: number;
-}
-
-type CaptureState = 'idle' | 'requesting' | 'waiting' | 'done' | 'error';
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function parseScreenshotResult(resultJson: string | null): {
-  screenshot: string;
-  sizeKB: number;
-} | null {
-  if (!resultJson) return null;
-  try {
-    const parsed = JSON.parse(resultJson);
-    if (parsed.screenshot) {
-      return {
-        screenshot: parsed.screenshot,
-        sizeKB: parsed.sizeKB || parsed.sizeKb || 0 // acepta ambos casos
-      };
-    }
-    return null;
-  } catch {
-    return null;
+declare global {
+  interface Window {
+    Player: any;
   }
 }
 
-// ── Componente principal ──────────────────────────────────────────────────────
 export default function RemoteViewPage() {
-  const [devices, setDevices] = useState<DeviceOption[]>([]);
-  const [selDevice, setSelDevice] = useState('');
-  const [frame, setFrame] = useState<ScreenshotFrame | null>(null);
-  const [captureState, setCaptureState] = useState<CaptureState>('idle');
-  const [errorMsg, setErrorMsg] = useState('');
-  const [liveMode, setLiveMode] = useState(false);
-  const [frameCount, setFrameCount] = useState(0);
-  const [fps, setFps] = useState(0);
+  const { adminKey } = useAuth();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const playerRef = useRef<any>(null);
+  const [devices, setDevices] = useState<{ deviceId: string; deviceName: string | null; isOnline: boolean }[]>([]);
+  const [deviceId, setDeviceId] = useState('');
+  const [connected, setConnected] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [playerReady, setPlayerReady] = useState(false);
 
-  const liveRef = useRef(false);
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const fpsCountRef = useRef(0);
-  const imgRef = useRef<HTMLImageElement>(null);
-
-  // Cargar dispositivos
+  // Cargar lista de dispositivos
   useEffect(() => {
-    api.getDevices().then(r => {
-      if (r.success && r.data) {
-        const devs = r.data.devices.map(d => ({
+    api.getDevices().then(res => {
+      if (res.success && res.data) {
+        const devs = res.data.devices.map(d => ({
           deviceId: d.deviceId,
           deviceName: d.deviceName,
           isOnline: d.isOnline,
         }));
         setDevices(devs);
-        const first = devs.find(d => d.isOnline) || devs[0];
-        if (first) setSelDevice(first.deviceId);
+        const firstOnline = devs.find(d => d.isOnline);
+        if (firstOnline) setDeviceId(firstOnline.deviceId);
       }
     });
   }, []);
 
-  // Cleanup al desmontar
+  // Cargar Broadway dinámicamente
   useEffect(() => {
-    return () => {
-      liveRef.current = false;
-      if (pollRef.current) clearTimeout(pollRef.current);
-      if (liveTimerRef.current) clearInterval(liveTimerRef.current);
-    };
-  }, []);
+    if (!canvasRef.current || playerRef.current) return;
 
-  // Contador de FPS
-  useEffect(() => {
-    if (!liveMode) { setFps(0); return; }
-    liveTimerRef.current = setInterval(() => {
-      setFps(fpsCountRef.current);
-      fpsCountRef.current = 0;
-    }, 1000);
-    return () => {
-      if (liveTimerRef.current) clearInterval(liveTimerRef.current);
-    };
-  }, [liveMode]);
-
-  // ── Solicitar una captura ─────────────────────────────────────────────────
-  const requestCapture = useCallback(async (): Promise<boolean> => {
-    if (!selDevice) return false;
-    setCaptureState('requesting');
-    setErrorMsg('');
-
-    const res = await api.requestScreenshot(selDevice);
-    if (!res.success || !res.data) {
-      setCaptureState('error');
-      setErrorMsg(res.error || 'Error solicitando captura');
-      return false;
-    }
-
-    const commandId = res.data.commandId;
-    setCaptureState('waiting');
-
-    // Polling hasta que el comando esté Executed (max 15s, cada 500ms)
-    const MAX_POLLS = 30;
-    for (let i = 0; i < MAX_POLLS; i++) {
-      await new Promise(r => setTimeout(r, 500));
-
-      // Si salimos del modo live, abortar
-      if (!liveRef.current && liveMode) return false;
-
-      const cmdRes = await api.pollScreenshotResult(commandId);
-      if (!cmdRes.success || !cmdRes.data) continue;
-
-      const cmd = cmdRes.data;
-
-      if (cmd.status === 'Executed' && cmd.result) {
-        const parsed = parseScreenshotResult(cmd.result);
-        if (parsed) {
-          setFrame({
-            base64: parsed.screenshot,
-            width: parsed.width,
-            height: parsed.height,
-            sizeKb: parsed.sizeKb,
-            takenAt: new Date(),
-            commandId,
+    const loadBroadway = () => {
+      if (window.Player && typeof window.Player === 'function') {
+        try {
+          playerRef.current = new window.Player({
+            useWorker: true,
+            workerFile: '/broadway/Decoder.js',
+            canvas: canvasRef.current
           });
-          fpsCountRef.current++;
-          setFrameCount(c => c + 1);
-          setCaptureState('done');
+          setPlayerReady(true);
           return true;
+        } catch (err) {
+          console.error('Error initializing Player:', err);
+          setError('Error al inicializar el decodificador de video');
+          return false;
         }
       }
+      return false;
+    };
 
-      if (cmd.status === 'Failed') {
-        setCaptureState('error');
-        setErrorMsg(cmd.errorMessage || 'El dispositivo reportó un error');
-        return false;
-      }
+    // Si ya está cargado
+    if (loadBroadway()) return;
 
-      if (cmd.status === 'Expired' || cmd.status === 'Cancelled') {
-        setCaptureState('error');
-        setErrorMsg(`Comando ${cmd.status.toLowerCase()}`);
-        return false;
-      }
-    }
+    // Cargar scripts dinámicamente
+    const script1 = document.createElement('script');
+    script1.src = '/broadway/Decoder.js';
+    script1.async = true;
+    const script2 = document.createElement('script');
+    script2.src = '/broadway/Player.js';
+    script2.async = true;
 
-    setCaptureState('error');
-    setErrorMsg('Timeout: el dispositivo no respondió en 15s');
-    return false;
-  }, [selDevice, liveMode]);
+    script2.onload = () => {
+      // Pequeño retraso para asegurar que el objeto global se haya registrado
+      setTimeout(() => loadBroadway(), 100);
+    };
+    script2.onerror = () => {
+      setError('No se pudo cargar el decodificador de video (Broadway)');
+    };
 
-  // ── Loop de Live Mode ─────────────────────────────────────────────────────
-  const startLive = useCallback(async () => {
-    liveRef.current = true;
-    setLiveMode(true);
-    setFrameCount(0);
+    document.head.appendChild(script1);
+    document.head.appendChild(script2);
+  }, [canvasRef]);
 
-    const loop = async () => {
-      if (!liveRef.current) return;
-      await requestCapture();
-      if (liveRef.current) {
-        // Pequeña pausa entre capturas para no saturar
-        pollRef.current = setTimeout(loop, 500);
+  // Conectar WebSocket
+  const connect = () => {
+    if (!deviceId) return;
+    const wsUrl = `${import.meta.env.VITE_SERVER_URL?.replace('http', 'ws')}/ws/viewer`;
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'auth', adminKey }));
+    };
+
+    ws.onmessage = (event) => {
+      if (typeof event.data === 'string') {
+        const msg = JSON.parse(event.data);
+        if (msg.status === 'watching') {
+          setConnected(true);
+          setError('');
+        } else if (msg.error) {
+          setError(msg.error);
+          setConnected(false);
+        }
+      } else if (event.data instanceof Blob) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const buffer = reader.result as ArrayBuffer;
+          const uint8Array = new Uint8Array(buffer);
+          if (playerRef.current && playerReady) {
+            playerRef.current.decode(uint8Array);
+          }
+        };
+        reader.readAsArrayBuffer(event.data);
       }
     };
-    loop();
-  }, [requestCapture]);
 
-  const stopLive = useCallback(() => {
-    liveRef.current = false;
-    setLiveMode(false);
-    if (pollRef.current) clearTimeout(pollRef.current);
-    setCaptureState('idle');
-  }, []);
+    ws.onclose = () => {
+      setConnected(false);
+      setStreaming(false);
+    };
 
-  // ── Descargar imagen ──────────────────────────────────────────────────────
-  const downloadFrame = () => {
-    if (!frame) return;
-    const a = document.createElement('a');
-    a.href = `data:image/jpeg;base64,${frame.base64}`;
-    a.download = `screenshot_${selDevice}_${Date.now()}.jpg`;
-    a.click();
+    ws.onerror = () => {
+      setError('Error de conexión WebSocket');
+      setConnected(false);
+    };
   };
 
-  const selectedDev = devices.find(d => d.deviceId === selDevice);
+  const disconnect = () => {
+    wsRef.current?.close();
+    setConnected(false);
+    setStreaming(false);
+  };
+
+  const startStreaming = async () => {
+    setLoading(true);
+    const res = await api.sendCommand({
+      deviceId,
+      commandType: 'START_SCREEN_STREAM',
+      parameters: null,
+      priority: 5
+    });
+    if (res.success) {
+      setStreaming(true);
+    } else {
+      setError(res.error || 'No se pudo iniciar el streaming');
+    }
+    setLoading(false);
+  };
+
+  const stopStreaming = async () => {
+    setLoading(true);
+    await api.sendCommand({
+      deviceId,
+      commandType: 'STOP_SCREEN_STREAM',
+      parameters: null,
+      priority: 5
+    });
+    setStreaming(false);
+    setLoading(false);
+  };
+
+  const sendInput = (type: string, x?: number, y?: number, keyCode?: number) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const msg: any = { type: 'input', event: type };
+    if (x !== undefined) msg.x = Math.round(x);
+    if (y !== undefined) msg.y = Math.round(y);
+    if (keyCode !== undefined) msg.keyCode = keyCode;
+    wsRef.current.send(JSON.stringify(msg));
+  };
+
+  // Eventos de ratón y teclado
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!connected) return;
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = (e.clientX - rect.left) * scaleX;
+      const y = (e.clientY - rect.top) * scaleY;
+      sendInput('mouse_move', x, y);
+    };
+    const handleMouseDown = (e: MouseEvent) => {
+      if (!connected) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+      sendInput('mouse_down', x, y);
+    };
+    const handleMouseUp = (e: MouseEvent) => {
+      if (!connected) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+      sendInput('mouse_up', x, y);
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!connected) return;
+      sendInput('key_down', undefined, undefined, e.keyCode);
+      e.preventDefault();
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (!connected) return;
+      sendInput('key_up', undefined, undefined, e.keyCode);
+      e.preventDefault();
+    };
+
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mousedown', handleMouseDown);
+    canvas.addEventListener('mouseup', handleMouseUp);
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      canvas.removeEventListener('mousemove', handleMouseMove);
+      canvas.removeEventListener('mousedown', handleMouseDown);
+      canvas.removeEventListener('mouseup', handleMouseUp);
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [canvasRef.current, connected]);
+
+  const selectedDevice = devices.find(d => d.deviceId === deviceId);
 
   return (
-    <div className="space-y-4 h-full flex flex-col">
-
-      {/* Encabezado */}
-      <div className="flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-3">
-          <Link to="/dispositivos"
-            className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg">
-            <ArrowLeft className="w-4 h-4" />
-          </Link>
-          <div>
-            <h1 className="text-xl font-bold text-white">Vista Remota</h1>
-            <p className="text-xs text-gray-500">
-              Snapshots bajo demanda · modo live ~1fps
-            </p>
-          </div>
-        </div>
-
-        {/* Indicadores live */}
-        {liveMode && (
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5 px-3 py-1.5
-              bg-red-500/20 border border-red-500/30 rounded-full">
-              <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-xs text-red-400 font-medium">LIVE</span>
-            </div>
-            <span className="text-xs text-gray-500">{fps} fps</span>
-            <span className="text-xs text-gray-500">{frameCount} frames</span>
-          </div>
-        )}
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <Link to="/dispositivos" className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg">
+          <ArrowLeft className="w-4 h-4" />
+        </Link>
+        <h1 className="text-xl font-bold text-white">Vista Remota (Streaming)</h1>
       </div>
 
-      {/* Controles */}
-      <div className="flex flex-wrap items-center gap-3 flex-shrink-0">
-        {/* Selector de dispositivo */}
+      <div className="flex flex-wrap items-center gap-3">
         <select
-          value={selDevice}
-          onChange={e => { setSelDevice(e.target.value); stopLive(); setFrame(null); }}
-          disabled={liveMode}
-          className="flex-1 min-w-48 px-3 py-2 bg-gray-900 border border-gray-800
-            rounded-lg text-white text-sm focus:outline-none focus:border-emerald-500
-            disabled:opacity-50"
+          value={deviceId}
+          onChange={e => setDeviceId(e.target.value)}
+          disabled={connected}
+          className="flex-1 min-w-48 px-3 py-2 bg-gray-900 border border-gray-800 rounded-lg text-white"
         >
           {devices.map(d => (
             <option key={d.deviceId} value={d.deviceId}>
-              {d.isOnline ? '● ' : '○ '}
-              {d.deviceName || d.deviceId}
+              {d.isOnline ? '● ' : '○ '}{d.deviceName || d.deviceId}
             </option>
           ))}
         </select>
 
-        {/* Estado del dispositivo */}
-        {selectedDev && (
-          <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs
-            font-medium ${selectedDev.isOnline
-              ? 'bg-emerald-500/20 text-emerald-400'
-              : 'bg-red-500/20 text-red-400'}`}>
-            <Wifi className="w-3.5 h-3.5" />
-            {selectedDev.isOnline ? 'Online' : 'Offline'}
-          </div>
-        )}
-
-        {/* Botón captura única */}
-        <button
-          onClick={() => requestCapture()}
-          disabled={liveMode || captureState === 'requesting' || captureState === 'waiting' || !selectedDev?.isOnline}
-          className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700
-            disabled:opacity-40 disabled:cursor-not-allowed text-gray-300
-            rounded-lg text-sm transition-colors"
-        >
-          <Camera className="w-4 h-4" />
-          Capturar
-        </button>
-
-        {/* Botón Live */}
-        {!liveMode ? (
+        {!connected ? (
           <button
-            onClick={startLive}
-            disabled={!selectedDev?.isOnline}
-            className="flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30
-              disabled:opacity-40 disabled:cursor-not-allowed text-red-400
-              rounded-lg text-sm transition-colors border border-red-500/30"
+            onClick={connect}
+            disabled={!selectedDevice?.isOnline}
+            className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg disabled:opacity-50"
           >
-            <Play className="w-4 h-4" />
-            Iniciar Live
+            Conectar
           </button>
         ) : (
           <button
-            onClick={stopLive}
-            className="flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600
-              text-white rounded-lg text-sm transition-colors"
+            onClick={disconnect}
+            className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg"
           >
-            <Square className="w-4 h-4" />
-            Detener
+            Desconectar
           </button>
         )}
 
-        {/* Acciones sobre el frame */}
-        {frame && (
-          <>
-            <button
-              onClick={downloadFrame}
-              className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700
-                text-gray-400 rounded-lg text-sm transition-colors"
-              title="Descargar imagen"
-            >
-              <Download className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => imgRef.current?.requestFullscreen()}
-              className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700
-                text-gray-400 rounded-lg text-sm transition-colors"
-              title="Pantalla completa"
-            >
-              <Maximize2 className="w-4 h-4" />
-            </button>
-          </>
+        {connected && !streaming && (
+          <button
+            onClick={startStreaming}
+            disabled={loading || !playerReady}
+            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> : <Play className="w-4 h-4 inline mr-1" />}
+            Iniciar streaming
+          </button>
+        )}
+
+        {connected && streaming && (
+          <button
+            onClick={stopStreaming}
+            disabled={loading}
+            className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> : <Square className="w-4 h-4 inline mr-1" />}
+            Detener streaming
+          </button>
         )}
       </div>
 
-      {/* Estado de captura */}
-      {captureState !== 'idle' && captureState !== 'done' && (
-        <div className={`flex items-center gap-3 px-4 py-3 rounded-lg text-sm
-          flex-shrink-0 ${captureState === 'error'
-            ? 'bg-red-500/10 border border-red-500/30 text-red-400'
-            : 'bg-blue-500/10 border border-blue-500/30 text-blue-400'
-          }`}>
-          {captureState === 'requesting' && <Loader2 className="w-4 h-4 animate-spin" />}
-          {captureState === 'waiting' && <Loader2 className="w-4 h-4 animate-spin" />}
-          {captureState === 'error' && <AlertTriangle className="w-4 h-4" />}
-          <span>
-            {captureState === 'requesting' && 'Enviando comando al dispositivo…'}
-            {captureState === 'waiting' && 'Esperando respuesta del dispositivo…'}
-            {captureState === 'error' && errorMsg}
-          </span>
+      {error && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4" />
+          {error}
         </div>
       )}
 
-      {/* Área principal de visualización */}
-      <div className="flex-1 bg-gray-950 border border-gray-800 rounded-xl
-        overflow-hidden flex items-center justify-center relative min-h-96">
+      {!selectedDevice?.isOnline && !connected && (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-400 text-sm">
+          El dispositivo no está online. No se puede conectar.
+        </div>
+      )}
 
-        {frame ? (
-          <>
-            {/* Imagen del frame */}
-            <img
-              ref={imgRef}
-              src={`data:image/png;base64,${frame.base64}`}
-              alt="Screenshot"
-              className="max-w-full max-h-full object-contain"
-              style={{ imageRendering: 'crisp-edges' }}
-            />
+      {!playerReady && !error && (
+        <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg text-blue-400 text-sm flex items-center gap-2">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          Cargando decodificador de video...
+        </div>
+      )}
 
-            {/* Overlay info */}
-            <div className="absolute bottom-0 left-0 right-0 px-4 py-2
-              bg-gradient-to-t from-black/80 to-transparent
-              flex items-center justify-between">
-              <div className="flex items-center gap-3 text-xs text-gray-400">
-                <span className="flex items-center gap-1">
-                  <Clock className="w-3 h-3" />
-                  {frame.takenAt.toLocaleTimeString('es-ES')}
-                </span>
-                {/* <span>{frame.width} × {frame.height}</span>
-                <span>{frame.sizeKb} KB</span> */}
-                <span>#{frame.commandId}</span>
-              </div>
-              {captureState === 'done' && !liveMode && (
-                <div className="flex items-center gap-1 text-xs text-emerald-400">
-                  <CheckCircle className="w-3 h-3" />
-                  Capturado
-                </div>
-              )}
-              {liveMode && (
-                <div className="flex items-center gap-1.5 text-xs text-red-400">
-                  <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                  LIVE · {fps} fps
-                </div>
-              )}
-            </div>
-          </>
-        ) : (
-          <div className="text-center p-12">
-            <Camera className="w-16 h-16 mx-auto mb-4 text-gray-700" />
-            <p className="text-gray-400 font-medium mb-2">Sin captura</p>
-            <p className="text-sm text-gray-600 mb-6">
-              Selecciona un dispositivo online y presiona "Capturar"
-              o inicia el modo Live
-            </p>
-            <div className="text-xs text-gray-700 space-y-1 text-left
-              bg-gray-900 rounded-lg p-4 inline-block">
-              <p className="text-gray-500 font-medium mb-2">Requisitos:</p>
-              <p>✓ Dispositivo online (WebSocket activo)</p>
-              <p>✓ Accessibility Service activo en el dispositivo</p>
-              <p>✓ Android 12+ (API 31) para capturas</p>
-            </div>
-          </div>
-        )}
+      <canvas
+        ref={canvasRef}
+        width={1280}
+        height={720}
+        style={{ width: '100%', height: 'auto', border: '1px solid #333', background: '#000' }}
+      />
 
-        {/* Overlay de carga sobre imagen existente */}
-        {frame && (captureState === 'requesting' || captureState === 'waiting') && (
-          <div className="absolute inset-0 bg-black/20 flex items-center justify-center">
-            <div className="bg-gray-900/90 rounded-xl px-6 py-4 flex items-center gap-3">
-              <Loader2 className="w-5 h-5 text-emerald-400 animate-spin" />
-              <span className="text-sm text-gray-300">
-                {captureState === 'requesting' ? 'Enviando…' : 'Capturando…'}
-              </span>
-            </div>
-          </div>
-        )}
+      <div className="text-xs text-gray-500 text-center">
+        {connected ? (streaming ? 'Conectado y transmitiendo – mouse y teclado se envían al dispositivo.' : 'Conectado, esperando streaming. Presiona "Iniciar streaming".') : 'Conecta para ver la pantalla remota.'}
       </div>
-
-      {/* Info de uso */}
-      {!liveMode && (
-        <div className="flex items-start gap-3 p-3 bg-amber-500/5
-          border border-amber-500/20 rounded-lg flex-shrink-0">
-          <AlertTriangle className="w-4 h-4 text-amber-500/60 flex-shrink-0 mt-0.5" />
-          <p className="text-xs text-gray-600">
-            El modo Live envía un comando cada ~2s. Consumo de red estimado: ~50-200 KB/s
-            dependiendo del contenido de pantalla. Detén el live cuando no sea necesario.
-          </p>
-        </div>
-      )}
     </div>
   );
 }

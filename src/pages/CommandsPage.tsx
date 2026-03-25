@@ -20,7 +20,7 @@ interface CommandDef {
 const COMMAND_TYPES: CommandDef[] = [
   // Dispositivo
   { group: 'Dispositivo', value: 'LOCK_DEVICE', label: 'Bloquear Pantalla', desc: 'Bloquea la pantalla inmediatamente' },
-  { group: 'Dispositivo', value: 'WAKE_SCREEN',  label: 'Encender Pantalla', desc: 'Enciende la pantalla remotamente (sin PIN)' },  // ← agregar
+  { group: 'Dispositivo', value: 'WAKE_SCREEN', label: 'Encender Pantalla', desc: 'Enciende la pantalla remotamente (sin PIN)' },  // ← agregar
   { group: 'Dispositivo', value: 'REBOOT_DEVICE', label: 'Reiniciar', desc: 'Reinicia el dispositivo', danger: true, autoConfirm: true },
   { group: 'Dispositivo', value: 'WIPE_DATA', label: 'Borrar Datos (Factory)', desc: 'Restablece a valores de fábrica', danger: true, autoConfirm: true },
   { group: 'Dispositivo', value: 'GET_DEVICE_INFO', label: 'Obtener Info', desc: 'Solicita información completa del dispositivo' },
@@ -50,6 +50,9 @@ const COMMAND_TYPES: CommandDef[] = [
   { group: 'Sistema', value: 'SET_BRIGHTNESS', label: 'Ajustar Brillo', desc: 'Cambia el brillo de pantalla (0–255)', hasParams: true },
   { group: 'Sistema', value: 'GET_LOCATION', label: 'Obtener Ubicación', desc: 'Retorna la última ubicación GPS conocida' },
   { group: 'Sistema', value: 'SEND_MESSAGE', label: 'Enviar Mensaje', desc: 'Muestra notificación en el dispositivo', hasParams: true },
+
+  { group: 'Remoto', value: 'START_SCREEN_STREAM', label: 'Iniciar streaming', desc: 'Comienza la transmisión de pantalla en tiempo real' },
+  { group: 'Remoto', value: 'STOP_SCREEN_STREAM', label: 'Detener streaming', desc: 'Detiene la transmisión de pantalla' },
 ];
 
 // Agrupar para mostrar en la UI
@@ -291,17 +294,17 @@ export default function CommandsPage() {
                         key={cmd.value}
                         onClick={() => selectCommand(cmd.value)}
                         className={`p-3 rounded-lg border text-left transition-all ${selectedCmd === cmd.value
-                            ? 'border-emerald-500 bg-emerald-500/10'
-                            : cmd.danger
-                              ? 'border-red-500/30 bg-red-500/5 hover:border-red-500/50'
-                              : 'border-gray-700 bg-gray-800/40 hover:border-gray-600'
+                          ? 'border-emerald-500 bg-emerald-500/10'
+                          : cmd.danger
+                            ? 'border-red-500/30 bg-red-500/5 hover:border-red-500/50'
+                            : 'border-gray-700 bg-gray-800/40 hover:border-gray-600'
                           }`}
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
                             <p className={`text-sm font-medium truncate ${selectedCmd === cmd.value
-                                ? 'text-emerald-400'
-                                : cmd.danger ? 'text-red-400' : 'text-white'
+                              ? 'text-emerald-400'
+                              : cmd.danger ? 'text-red-400' : 'text-white'
                               }`}>
                               {cmd.label}
                             </p>
@@ -371,8 +374,8 @@ export default function CommandsPage() {
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-base font-semibold text-white">Prioridad</h3>
               <span className={`text-sm font-bold px-2 py-0.5 rounded ${priority <= 3 ? 'text-red-400 bg-red-500/20'
-                  : priority <= 6 ? 'text-amber-400 bg-amber-500/20'
-                    : 'text-gray-400 bg-gray-700'
+                : priority <= 6 ? 'text-amber-400 bg-amber-500/20'
+                  : 'text-gray-400 bg-gray-700'
                 }`}>
                 {priority <= 3 ? `Alta (${priority})` : priority <= 6 ? `Media (${priority})` : `Baja (${priority})`}
               </span>
@@ -420,8 +423,8 @@ export default function CommandsPage() {
           {/* Resultado individual */}
           {result && (
             <div className={`p-4 rounded-xl border flex items-start gap-3 ${result.success
-                ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
-                : 'bg-red-500/10 border-red-500/40 text-red-400'
+              ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-400'
+              : 'bg-red-500/10 border-red-500/40 text-red-400'
               }`}>
               {result.success
                 ? <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
