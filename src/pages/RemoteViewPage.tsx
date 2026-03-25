@@ -9,16 +9,14 @@ import api from '../services/api';
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 interface DeviceOption {
-  deviceId:   string;
+  deviceId: string;
   deviceName: string | null;
-  isOnline:   boolean;
+  isOnline: boolean;
 }
 
 interface ScreenshotFrame {
   base64:    string;
-  width:     number;
-  height:    number;
-  sizeKb:    number;
+  sizeKB:    number;
   takenAt:   Date;
   commandId: number;
 }
@@ -27,41 +25,49 @@ type CaptureState = 'idle' | 'requesting' | 'waiting' | 'done' | 'error';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function parseScreenshotResult(resultJson: string | null): {
-  screenshot: string; width: number; height: number; sizeKb: number
+  screenshot: string;
+  sizeKB: number;
 } | null {
   if (!resultJson) return null;
   try {
     const parsed = JSON.parse(resultJson);
-    if (parsed.screenshot) return parsed;
+    if (parsed.screenshot) {
+      return {
+        screenshot: parsed.screenshot,
+        sizeKB: parsed.sizeKB || parsed.sizeKb || 0 // acepta ambos casos
+      };
+    }
     return null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 // ── Componente principal ──────────────────────────────────────────────────────
 export default function RemoteViewPage() {
-  const [devices,       setDevices]       = useState<DeviceOption[]>([]);
-  const [selDevice,     setSelDevice]     = useState('');
-  const [frame,         setFrame]         = useState<ScreenshotFrame | null>(null);
-  const [captureState,  setCaptureState]  = useState<CaptureState>('idle');
-  const [errorMsg,      setErrorMsg]      = useState('');
-  const [liveMode,      setLiveMode]      = useState(false);
-  const [frameCount,    setFrameCount]    = useState(0);
-  const [fps,           setFps]           = useState(0);
+  const [devices, setDevices] = useState<DeviceOption[]>([]);
+  const [selDevice, setSelDevice] = useState('');
+  const [frame, setFrame] = useState<ScreenshotFrame | null>(null);
+  const [captureState, setCaptureState] = useState<CaptureState>('idle');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [liveMode, setLiveMode] = useState(false);
+  const [frameCount, setFrameCount] = useState(0);
+  const [fps, setFps] = useState(0);
 
-  const liveRef       = useRef(false);
-  const pollRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const liveTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
-  const fpsCountRef   = useRef(0);
-  const imgRef        = useRef<HTMLImageElement>(null);
+  const liveRef = useRef(false);
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fpsCountRef = useRef(0);
+  const imgRef = useRef<HTMLImageElement>(null);
 
   // Cargar dispositivos
   useEffect(() => {
     api.getDevices().then(r => {
       if (r.success && r.data) {
         const devs = r.data.devices.map(d => ({
-          deviceId:   d.deviceId,
+          deviceId: d.deviceId,
           deviceName: d.deviceName,
-          isOnline:   d.isOnline,
+          isOnline: d.isOnline,
         }));
         setDevices(devs);
         const first = devs.find(d => d.isOnline) || devs[0];
@@ -74,7 +80,7 @@ export default function RemoteViewPage() {
   useEffect(() => {
     return () => {
       liveRef.current = false;
-      if (pollRef.current)     clearTimeout(pollRef.current);
+      if (pollRef.current) clearTimeout(pollRef.current);
       if (liveTimerRef.current) clearInterval(liveTimerRef.current);
     };
   }, []);
@@ -124,11 +130,11 @@ export default function RemoteViewPage() {
         const parsed = parseScreenshotResult(cmd.result);
         if (parsed) {
           setFrame({
-            base64:    parsed.screenshot,
-            width:     parsed.width,
-            height:    parsed.height,
-            sizeKb:    parsed.sizeKb,
-            takenAt:   new Date(),
+            base64: parsed.screenshot,
+            width: parsed.width,
+            height: parsed.height,
+            sizeKb: parsed.sizeKb,
+            takenAt: new Date(),
             commandId,
           });
           fpsCountRef.current++;
@@ -183,8 +189,8 @@ export default function RemoteViewPage() {
   // ── Descargar imagen ──────────────────────────────────────────────────────
   const downloadFrame = () => {
     if (!frame) return;
-    const a    = document.createElement('a');
-    a.href     = `data:image/jpeg;base64,${frame.base64}`;
+    const a = document.createElement('a');
+    a.href = `data:image/jpeg;base64,${frame.base64}`;
     a.download = `screenshot_${selDevice}_${Date.now()}.jpg`;
     a.click();
   };
@@ -314,18 +320,17 @@ export default function RemoteViewPage() {
       {/* Estado de captura */}
       {captureState !== 'idle' && captureState !== 'done' && (
         <div className={`flex items-center gap-3 px-4 py-3 rounded-lg text-sm
-          flex-shrink-0 ${
-          captureState === 'error'
+          flex-shrink-0 ${captureState === 'error'
             ? 'bg-red-500/10 border border-red-500/30 text-red-400'
             : 'bg-blue-500/10 border border-blue-500/30 text-blue-400'
-        }`}>
+          }`}>
           {captureState === 'requesting' && <Loader2 className="w-4 h-4 animate-spin" />}
-          {captureState === 'waiting'    && <Loader2 className="w-4 h-4 animate-spin" />}
-          {captureState === 'error'      && <AlertTriangle className="w-4 h-4" />}
+          {captureState === 'waiting' && <Loader2 className="w-4 h-4 animate-spin" />}
+          {captureState === 'error' && <AlertTriangle className="w-4 h-4" />}
           <span>
             {captureState === 'requesting' && 'Enviando comando al dispositivo…'}
-            {captureState === 'waiting'    && 'Esperando respuesta del dispositivo…'}
-            {captureState === 'error'      && errorMsg}
+            {captureState === 'waiting' && 'Esperando respuesta del dispositivo…'}
+            {captureState === 'error' && errorMsg}
           </span>
         </div>
       )}
@@ -354,8 +359,8 @@ export default function RemoteViewPage() {
                   <Clock className="w-3 h-3" />
                   {frame.takenAt.toLocaleTimeString('es-ES')}
                 </span>
-                <span>{frame.width} × {frame.height}</span>
-                <span>{frame.sizeKb} KB</span>
+                {/* <span>{frame.width} × {frame.height}</span>
+                <span>{frame.sizeKb} KB</span> */}
                 <span>#{frame.commandId}</span>
               </div>
               {captureState === 'done' && !liveMode && (
