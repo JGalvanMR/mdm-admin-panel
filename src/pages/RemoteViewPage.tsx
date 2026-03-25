@@ -39,50 +39,52 @@ export default function RemoteViewPage() {
     });
   }, []);
 
-  // Cargar Broadway dinámicamente
+  // Cargar Broadway dinámicamente (asegurar orden)
   useEffect(() => {
-    if (!canvasRef.current || playerRef.current) return;
+    if (!canvasRef.current) return;
+    if (playerRef.current) return;
 
-    const loadBroadway = () => {
-      if (window.Player && typeof window.Player === 'function') {
-        try {
-          playerRef.current = new window.Player({
-            useWorker: true,
-            workerFile: '/broadway/Decoder.js',
-            canvas: canvasRef.current
-          });
-          setPlayerReady(true);
-          return true;
-        } catch (err) {
-          console.error('Error initializing Player:', err);
-          setError('Error al inicializar el decodificador de video');
-          return false;
-        }
+    const loadScript = (src: string): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = false; // Mantener orden
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error(`Failed to load ${src}`));
+        document.head.appendChild(script);
+      });
+    };
+
+    const initializePlayer = () => {
+      if (!window.Player) {
+        setError('Decodificador Broadway no disponible');
+        return;
       }
-      return false;
+      try {
+        playerRef.current = new window.Player({
+          useWorker: true,
+          workerFile: '/broadway/Decoder.js',
+          canvas: canvasRef.current
+        });
+        setPlayerReady(true);
+        console.log('Broadway Player inicializado');
+      } catch (err) {
+        console.error('Error inicializando Player:', err);
+        setError('Error al inicializar decodificador de video');
+      }
     };
 
-    // Si ya está cargado
-    if (loadBroadway()) return;
-
-    // Cargar scripts dinámicamente
-    const script1 = document.createElement('script');
-    script1.src = '/broadway/Decoder.js';
-    script1.async = true;
-    const script2 = document.createElement('script');
-    script2.src = '/broadway/Player.js';
-    script2.async = true;
-
-    script2.onload = () => {
-      // Pequeño retraso para asegurar que el objeto global se haya registrado
-      setTimeout(() => loadBroadway(), 100);
-    };
-    script2.onerror = () => {
-      setError('No se pudo cargar el decodificador de video (Broadway)');
-    };
-
-    document.head.appendChild(script1);
-    document.head.appendChild(script2);
+    // Cargar Decoder.js y luego Player.js
+    loadScript('/broadway/Decoder.js')
+      .then(() => loadScript('/broadway/Player.js'))
+      .then(() => {
+        // Pequeña pausa para que el objeto window.Player esté completamente definido
+        setTimeout(initializePlayer, 100);
+      })
+      .catch(err => {
+        console.error(err);
+        setError('No se pudieron cargar los scripts de Broadway');
+      });
   }, [canvasRef]);
 
   // Conectar WebSocket
