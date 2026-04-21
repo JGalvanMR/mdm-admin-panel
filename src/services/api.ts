@@ -1,6 +1,10 @@
-// Servicio API — MDMServer
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://192.168.123.155:5000';
-const API_BASE = `${SERVER_URL}/api/admin`;
+// src/services/api.ts
+// ─────────────────────────────────────────────────────────────────────────────
+// API Service para MDM Server
+// Usa rutas relativas para que el proxy de Vite (en desarrollo) redirija
+// las peticiones a http://localhost:61210 sin problemas de CORS.
+// En producción, el backend debe servir la API en el mismo origen o configurar CORS.
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ── Tipos base ────────────────────────────────────────────────────────────────
 export interface ApiResponse<T> {
@@ -198,10 +202,12 @@ export interface RemoteViewSession {
   takenAt:   string | null;
 }
 
-
-// ── Cliente API ───────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIENTE API (rutas relativas para usar proxy de Vite en desarrollo)
+// ─────────────────────────────────────────────────────────────────────────────
 class MdmApiService {
   private adminKey = '';
+  private readonly API_BASE = '/api/admin';  // ✅ ruta relativa
 
   setAdminKey(key: string) { this.adminKey = key; }
   getAdminKey(): string { return this.adminKey; }
@@ -218,7 +224,7 @@ class MdmApiService {
     if (this.adminKey) headers['X-Admin-Key'] = this.adminKey;
 
     try {
-      const response = await fetch(`${API_BASE}${endpoint}`, { ...options, headers });
+      const response = await fetch(`${this.API_BASE}${endpoint}`, { ...options, headers });
       const data = await response.json();
       if (!response.ok) {
         return { success: false, error: data.error || `Error HTTP ${response.status}` };
@@ -324,14 +330,14 @@ class MdmApiService {
   }
   
   async requestScreenshot(deviceId: string): Promise<ApiResponse<{ commandId: number; message: string }>> {
-  return this.request(`/devices/${encodeURIComponent(deviceId)}/screenshot`, {
-    method: 'POST',
-  });
-}
+    return this.request(`/devices/${encodeURIComponent(deviceId)}/screenshot`, {
+      method: 'POST',
+    });
+  }
 
-async pollScreenshotResult(commandId: number): Promise<ApiResponse<Command>> {
-  return this.request(`/commands/${commandId}`);
-}
+  async pollScreenshotResult(commandId: number): Promise<ApiResponse<Command>> {
+    return this.request(`/commands/${commandId}`);
+  }
 
   // ── Location Tracking ─────────────────────────────────────────────────────────
   startLocationTracking(

@@ -116,14 +116,19 @@ export default function MonitoringPage() {
         if (!selDevice) return;
         setLoading(true);
         try {
+            // Usamos el servicio api en lugar de fetch manual con URLs absolutas
             const [latRes, histRes, locRes, geoRes] = await Promise.all([
-                fetch(`${import.meta.env.VITE_SERVER_URL || 'http://192.168.123.155:5000'}/api/admin/devices/${encodeURIComponent(selDevice)}/telemetry/latest`, {
+                // Obtener la telemetría más reciente
+                fetch(`/api/admin/devices/${encodeURIComponent(selDevice)}/telemetry/latest`, {
                     headers: { 'X-Admin-Key': localStorage.getItem('mdm_admin_key') || '' }
                 }).then(r => r.json()),
-                fetch(`${import.meta.env.VITE_SERVER_URL || 'http://192.168.123.155:5000'}/api/admin/devices/${encodeURIComponent(selDevice)}/telemetry?hoursBack=${hours}&maxRows=100`, {
+                // Obtener historial de telemetría
+                fetch(`/api/admin/devices/${encodeURIComponent(selDevice)}/telemetry?hoursBack=${hours}&maxRows=100`, {
                     headers: { 'X-Admin-Key': localStorage.getItem('mdm_admin_key') || '' }
                 }).then(r => r.json()),
+                // Usar api para el historial de ubicaciones (ya relativo)
                 api.getLocationHistory(selDevice, hours),
+                // Geofences
                 api.getGeofences(selDevice).catch(() => ({ success: true, data: [] }))
             ]);
 
