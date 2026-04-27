@@ -155,6 +155,20 @@ export default function RemoteViewPage() {
   const authTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const watchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // RECONEXIÓN – Refs para gestionar reconexiones automáticas
+  const manualCloseRef = useRef(false);
+  const retryCountRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isReconnectingRef = useRef(false);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // THROTTLING INPUT – nuevas refs para optimizar touch_move
+  // ══════════════════════════════════════════════════════════════════════════
+  const moveFrameRef = useRef<number>(0);
+  const pendingMoveRef = useRef<{ x: number; y: number } | null>(null);
+  const lastTouchCoordsRef = useRef<{ x: number; y: number } | null>(null);
+  const streamingRef = useRef(false); // para leer dentro de requestAnimationFrame
+
   // State
   const [devices, setDevices] = useState<
     Array<{ deviceId: string; deviceName: string | null; isOnline: boolean }>
@@ -168,9 +182,7 @@ export default function RemoteViewPage() {
   const [frameCount, setFrameCount] = useState(0);
   const [waitingKey, setWaitingKey] = useState(false);
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // DIAGNOSTIC STATE — shows exactly what's happening in the WS handshake
-  // ══════════════════════════════════════════════════════════════════════════
+  // Diag state
   const [diag, setDiag] = useState({
     wsState: 'idle' as string,
     authSent: false,
@@ -188,11 +200,16 @@ export default function RemoteViewPage() {
     setDiag(prev => ({ ...prev, ...patch }));
   }, []);
 
+  // Sincronizar streamingRef con el estado
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
+
   useEffect(() => {
     deviceIdRef.current = deviceId;
   }, [deviceId]);
 
-  // ── Bootstrap ─────────────────────────────────────────────────────────────
+  // Bootstrap
   useEffect(() => {
     setWcOk(typeof VideoDecoder !== 'undefined');
   }, []);
@@ -220,7 +237,7 @@ export default function RemoteViewPage() {
     }
   }, []);
 
-  // ── Timer management ──────────────────────────────────────────────────────
+  // Timer management
   const clearAllTimers = useCallback(() => {
     if (initialWatchdogRef.current) {
       clearTimeout(initialWatchdogRef.current);
@@ -246,15 +263,25 @@ export default function RemoteViewPage() {
 
   useEffect(() => {
     return () => {
+      manualCloseRef.current = true;
       wsRef.current?.close();
       if (decoderRef.current && decoderRef.current.state !== 'closed') {
         decoderRef.current.close();
       }
       clearAllTimers();
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      // Limpiar throttle input
+      if (moveFrameRef.current) {
+        cancelAnimationFrame(moveFrameRef.current);
+        moveFrameRef.current = 0;
+      }
     };
   }, [clearAllTimers]);
 
-  // ── Request keyframe via WebSocket ────────────────────────────────────────
+  // Request keyframe
   const requestKeyframeWS = useCallback(() => {
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) {
@@ -265,7 +292,6 @@ export default function RemoteViewPage() {
     return false;
   }, []);
 
-  // ── Force keyframe via REST ───────────────────────────────────────────────
   const forceKeyframe = useCallback(async () => {
     const devId = deviceIdRef.current;
     if (!devId) return;
@@ -298,7 +324,7 @@ export default function RemoteViewPage() {
     }
   }, []);
 
-  // ── Start output stall monitoring ─────────────────────────────────────────
+  // Stall monitor
   const startStallMonitor = useCallback(() => {
     if (stallWatchdogRef.current) {
       clearInterval(stallWatchdogRef.current);
@@ -320,7 +346,6 @@ export default function RemoteViewPage() {
     }, 1000);
   }, [requestKeyframeWS, forceKeyframe]);
 
-  // ── Start periodic keyframe requests ──────────────────────────────────────
   const startKeyframeInterval = useCallback(() => {
     if (keyframeIntervalRef.current) {
       clearInterval(keyframeIntervalRef.current);
@@ -333,7 +358,7 @@ export default function RemoteViewPage() {
     }, KEYFRAME_REQUEST_INTERVAL_MS);
   }, [requestKeyframeWS]);
 
-  // ── Flush access unit ─────────────────────────────────────────────────────
+  // Flush AU
   const flushAU = useCallback(
     (decoder: VideoDecoder, buf: Uint8Array[]) => {
       if (!buf.length) return;
@@ -375,7 +400,7 @@ export default function RemoteViewPage() {
     [requestKeyframeWS, updateDiag]
   );
 
-  // ── VideoDecoder initialization ───────────────────────────────────────────
+  // Init decoder
   const initDecoder = useCallback(
     (spsRaw: Uint8Array, ppsRaw: Uint8Array) => {
       if (decoderRef.current) {
@@ -387,7 +412,6 @@ export default function RemoteViewPage() {
         decoderRef.current = null;
       }
 
-      // Clear keyframe-related timers (keep auth/watch timers)
       if (initialWatchdogRef.current) {
         clearTimeout(initialWatchdogRef.current);
         initialWatchdogRef.current = null;
@@ -403,7 +427,7 @@ export default function RemoteViewPage() {
 
       const codec = spsToCodecString(spsRaw);
       const extraData = buildAVCCExtraData(spsRaw, ppsRaw);
-      const description: ArrayBuffer = extraData.buffer;
+      const description: ArrayBufferLike = extraData.buffer;
 
       console.log('[initDecoder] codec:', codec, 'extraData length:', extraData.length);
       updateDiag({ decoderState: 'configuring' });
@@ -480,7 +504,6 @@ export default function RemoteViewPage() {
       console.log('[VideoDecoder] configured successfully');
       updateDiag({ decoderState: 'configured-waiting-key' });
 
-      // Keyframe watchdog
       setWaitingKey(true);
       initialWatchdogRef.current = setTimeout(() => {
         if (!firstFrameRef.current) {
@@ -502,7 +525,7 @@ export default function RemoteViewPage() {
     [forceKeyframe, requestKeyframeWS, startStallMonitor, startKeyframeInterval, updateDiag]
   );
 
-  // ── Handle video_config ───────────────────────────────────────────────────
+  // Handle video config
   const handleVideoConfig = useCallback(
     (msg: { sps?: string; pps?: string }) => {
       videoConfigsReceivedRef.current++;
@@ -518,19 +541,6 @@ export default function RemoteViewPage() {
       try {
         const sps = b64ToU8(msg.sps);
         const pps = b64ToU8(msg.pps);
-
-        // Log NAL types for debugging
-        const spsType = sps[0] & 0x1f;
-        const ppsType = pps[0] & 0x1f;
-        console.log('[VideoConfig] NAL types — SPS header byte:', sps[0].toString(16), '(type', spsType, ') PPS header byte:', pps[0].toString(16), '(type', ppsType, ')');
-
-        if (spsType !== 7) {
-          console.error('[VideoConfig] ⚠️ SPS has wrong NAL type:', spsType, 'expected 7 (but might include start code 00 00 00 01, check byte 4)');
-        }
-        if (ppsType !== 8) {
-          console.error('[VideoConfig] ⚠️ PPS has wrong NAL type:', ppsType, 'expected 8 (but might include start code 00 00 00 01, check byte 4)');
-        }
-
         initDecoder(sps, pps);
       } catch (e) {
         console.error('[VideoConfig] init failed:', e);
@@ -541,7 +551,7 @@ export default function RemoteViewPage() {
     [initDecoder, updateDiag]
   );
 
-  // ── Handle binary video data ──────────────────────────────────────────────
+  // Handle binary video data
   const handleVideoData = useCallback(
     (data: Uint8Array) => {
       binaryFramesReceivedRef.current++;
@@ -549,31 +559,18 @@ export default function RemoteViewPage() {
 
       const decoder = decoderRef.current;
 
-      // ═══════════════════════════════════════════════════════════════════════
-      // CRITICAL DIAGNOSTIC: If we receive binary data but decoder isn't ready,
-      // it means the server sent frames WITHOUT video_config, or video_config
-      // was lost/not forwarded. This is a SERVER bug.
-      // ═══════════════════════════════════════════════════════════════════════
       if (!decoder || decoder.state !== 'configured' || !configReadyRef.current) {
-        // Only log the first few times to avoid spam
         if (binaryFramesReceivedRef.current <= 3) {
           console.error(
             '🔴 [VideoData] BINARY FRAME RECEIVED BUT DECODER NOT READY!',
-            '\n  → This means the server sent video frames WITHOUT sending video_config first.',
-            '\n  → Check your server: does /ws/viewer forward video_config messages?',
-            '\n  → Frame size:', data.length, 'bytes',
-            '\n  → Binary frames received so far:', binaryFramesReceivedRef.current,
-            '\n  → Video configs received:', videoConfigsReceivedRef.current
+            '\n  → Frame size:', data.length, 'bytes'
           );
         }
         return;
       }
 
       if (decoder.decodeQueueSize > MAX_DECODE_QUEUE_SIZE) {
-        console.warn(
-          '[VideoData] backpressure — queue size:',
-          decoder.decodeQueueSize
-        );
+        console.warn('[VideoData] backpressure — queue size:', decoder.decodeQueueSize);
         return;
       }
 
@@ -606,7 +603,7 @@ export default function RemoteViewPage() {
     [flushAU, updateDiag]
   );
 
-  // ── Input forwarding ──────────────────────────────────────────────────────
+  // Input forwarding
   const sendInput = useCallback(
     (eventType: string, x: number, y: number) => {
       const ws = wsRef.current;
@@ -615,8 +612,8 @@ export default function RemoteViewPage() {
         JSON.stringify({
           type: 'input',
           eventType,
-          x: Math.round(x),
-          y: Math.round(y),
+          x: x,
+          y: y,
           timestamp: Date.now(),
         })
       );
@@ -637,8 +634,33 @@ export default function RemoteViewPage() {
     []
   );
 
-  // ── WebSocket connection ──────────────────────────────────────────────────
-  const connect = useCallback(() => {
+  // ══════════════════════════════════════════════════════════════════════════
+  // THROTTLING INPUT FUNCTIONS
+  // ══════════════════════════════════════════════════════════════════════════
+  const scheduleMove = useCallback((x: number, y: number) => {
+    pendingMoveRef.current = { x, y };
+    if (!moveFrameRef.current && streamingRef.current) {
+      moveFrameRef.current = requestAnimationFrame(() => {
+        if (pendingMoveRef.current && streamingRef.current) {
+          sendInput('touch_move', pendingMoveRef.current.x, pendingMoveRef.current.y);
+          lastTouchCoordsRef.current = pendingMoveRef.current;
+          pendingMoveRef.current = null;
+        }
+        moveFrameRef.current = 0;
+      });
+    }
+  }, [sendInput]);
+
+  const cancelPendingMove = useCallback(() => {
+    if (moveFrameRef.current) {
+      cancelAnimationFrame(moveFrameRef.current);
+      moveFrameRef.current = 0;
+    }
+    pendingMoveRef.current = null;
+  }, []);
+
+  // Connect
+  const connect = useCallback((isRetry = false) => {
     if (!deviceId || !adminKey) {
       setError('Missing device or auth key');
       return;
@@ -656,34 +678,34 @@ export default function RemoteViewPage() {
     const base = import.meta.env.VITE_SERVER_URL || 'http://192.168.123.155:5000';
     const wsUrl = `${base.replace(/^http/, 'ws')}/ws/viewer`;
 
-    console.log('[WS] ══════════════════════════════════════════════════');
-    console.log('[WS] connecting to', wsUrl);
-    console.log('[WS] ══════════════════════════════════════════════════');
+    if (!isRetry) {
+      console.log('[WS] ══════════════════════════════════════════════════');
+      console.log('[WS] connecting to', wsUrl);
+    } else {
+      console.log(`[WS] Reconexión intento #${retryCountRef.current} a ${wsUrl}`);
+    }
 
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
 
-    // Reset all diagnostic state
     authSentRef.current = false;
     watchSentRef.current = false;
     binaryFramesReceivedRef.current = 0;
     videoConfigsReceivedRef.current = 0;
-    updateDiag({
-      wsState: 'connecting',
-      authSent: false,
-      authReceived: false,
-      watchSent: false,
-      watchReceived: false,
-      videoConfigCount: 0,
-      binaryFrameCount: 0,
-      decoderState: 'none',
-      lastMsg: '',
-      lastMsgTime: '',
-    });
+
+    if (!isReconnectingRef.current) {
+      updateDiag({
+        wsState: 'connecting',
+        authSent: false, authReceived: false,
+        watchSent: false, watchReceived: false,
+        videoConfigCount: 0, binaryFrameCount: 0,
+        decoderState: 'none', lastMsg: '', lastMsgTime: '',
+      });
+    }
 
     ws.onopen = () => {
-      console.log('[WS] ✅ OPEN — sending auth');
+      console.log('[WS] ✅ OPEN');
       updateDiag({ wsState: 'open' });
 
       const authMsg = JSON.stringify({ type: 'auth', adminKey });
@@ -691,15 +713,9 @@ export default function RemoteViewPage() {
       authSentRef.current = true;
       updateDiag({ authSent: true, lastMsg: '→ auth', lastMsgTime: new Date().toLocaleTimeString() });
 
-      // ═══════════════════════════════════════════════════════════════════════
-      // AUTH TIMEOUT — if server doesn't respond in 5s, something is broken
-      // ═══════════════════════════════════════════════════════════════════════
       authTimeoutRef.current = setTimeout(() => {
         if (!diag.authReceived) {
-          const msg = '⚠️ SERVER BUG: Auth sent but no response received in 5s. Check /ws/viewer handler sends {status:"authenticated"}';
-          console.error('[WS]', msg);
-          setError(msg);
-          updateDiag({ wsState: 'auth-timeout' });
+          console.warn('[WS] Auth timeout');
         }
       }, AUTH_TIMEOUT_MS);
     };
@@ -716,9 +732,6 @@ export default function RemoteViewPage() {
           return;
         }
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // LOG EVERY TEXT MESSAGE — critical for debugging server handshake
-        // ═══════════════════════════════════════════════════════════════════════
         console.log('[WS] ← TEXT:', JSON.stringify(msg).substring(0, 200));
         updateDiag({ lastMsg: '← ' + JSON.stringify(msg).substring(0, 80), lastMsgTime: timeStr });
 
@@ -736,9 +749,6 @@ export default function RemoteViewPage() {
           watchSentRef.current = true;
           updateDiag({ watchSent: true, lastMsg: '→ watch', lastMsgTime: timeStr });
 
-          // ═══════════════════════════════════════════════════════════════════════
-          // WATCH TIMEOUT — if server doesn't confirm watch in 5s
-          // ═══════════════════════════════════════════════════════════════════════
           watchTimeoutRef.current = setTimeout(() => {
             if (!diag.watchReceived) {
               const msg = '⚠️ SERVER BUG: Watch sent but no {status:"watching"} received in 5s. Check /ws/viewer handler.';
@@ -770,14 +780,10 @@ export default function RemoteViewPage() {
           ws.close();
 
         } else {
-          // Unknown message type — log it for debugging
           console.log('[WS] ⚠️ Unknown message type:', msg.type ?? msg.status ?? '(no type/status)');
         }
 
       } else if (event.data instanceof ArrayBuffer) {
-        // ═══════════════════════════════════════════════════════════════════════
-        // BINARY FRAME — log first 3 for debugging
-        // ═══════════════════════════════════════════════════════════════════════
         if (binaryFramesReceivedRef.current < 3) {
           const view = new Uint8Array(event.data);
           const headerHex = Array.from(view.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
@@ -789,52 +795,70 @@ export default function RemoteViewPage() {
     };
 
     ws.onclose = (event: CloseEvent) => {
-      console.log('[WS] CLOSED — code:', event.code, 'reason:', event.reason);
-      if (wsRef.current === ws) {
-        wsRef.current = null;
+      console.log('[WS] CLOSED — code:', event);
+      if (wsRef.current === ws) wsRef.current = null;
+
+      if (!manualCloseRef.current) {
+        retryCountRef.current++;
+        isReconnectingRef.current = true;
+
+        const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 30000);
+
+        console.log(`[WS] Reconectando en ${delay}ms (intento #${retryCountRef.current})`);
+        updateDiag({ wsState: `reconnecting (${retryCountRef.current})` });
+
+        retryTimerRef.current = setTimeout(() => {
+          connect(true);
+        }, delay);
+      } else {
+        setConnected(false);
+        setStreaming(false);
+        setWaitingKey(false);
+        configReadyRef.current = false;
+        updateDiag({ wsState: `closed (${event.code})` });
       }
-      setConnected(false);
-      setStreaming(false);
-      setWaitingKey(false);
-      configReadyRef.current = false;
+
       clearAllTimers();
-      updateDiag({ wsState: `closed (${event.code})` });
     };
 
-    ws.onerror = (e: Event) => {
-      console.error('[WS] ERROR event');
-      setError('WebSocket connection error');
-      setConnected(false);
+    ws.onerror = () => {
+      if (!isReconnectingRef.current) {
+        setError('Error de conexión WebSocket');
+      }
       updateDiag({ wsState: 'error' });
     };
-  }, [deviceId, adminKey, handleVideoConfig, handleVideoData, clearAllTimers, updateDiag, diag.authReceived, diag.watchReceived]);
+  }, [deviceId, adminKey, handleVideoConfig, handleVideoData, clearAllTimers, updateDiag, diag.authReceived]);
 
-  // ── Disconnect ────────────────────────────────────────────────────────────
+  // Disconnect
   const disconnect = useCallback(() => {
+    cancelPendingMove(); // limpiar cualquier movimiento pendiente
+    manualCloseRef.current = true;
+    isReconnectingRef.current = false;
+    retryCountRef.current = 0;
+
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+
     wsRef.current?.close();
     wsRef.current = null;
 
     if (decoderRef.current && decoderRef.current.state !== 'closed') {
-      try { decoderRef.current.close(); } catch (e) {
-        console.warn('[disconnect] decoder.close() error:', e);
-      }
+      try { decoderRef.current.close(); } catch (e) { /* ignore */ }
     }
     decoderRef.current = null;
-
     configReadyRef.current = false;
     nalBufRef.current = [];
     firstFrameRef.current = false;
-    consecutiveErrorsRef.current = 0;
-
-    clearAllTimers();
 
     setConnected(false);
     setStreaming(false);
     setWaitingKey(false);
     setFrameCount(0);
-  }, [clearAllTimers]);
+  }, [cancelPendingMove]);
 
-  // ── Start streaming ───────────────────────────────────────────────────────
+  // Start streaming
   const startStreaming = useCallback(async () => {
     if (!deviceId) return;
 
@@ -876,10 +900,11 @@ export default function RemoteViewPage() {
     setLoading(false);
   }, [deviceId]);
 
-  // ── Stop streaming ────────────────────────────────────────────────────────
+  // Stop streaming
   const stopStreaming = useCallback(async () => {
     if (!deviceId) return;
 
+    cancelPendingMove(); // limpiar movimientos pendientes al detener el video
     setLoading(true);
     clearAllTimers();
 
@@ -900,12 +925,11 @@ export default function RemoteViewPage() {
     setStreaming(false);
     setWaitingKey(false);
     setLoading(false);
-  }, [deviceId, clearAllTimers]);
+  }, [deviceId, clearAllTimers, cancelPendingMove]);
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // Render
   const selectedDevice = devices.find(d => d.deviceId === deviceId);
 
-  // Build diagnostic error message if handshake is broken
   const handshakeBroken = diag.authSent && !diag.authReceived;
   const watchBroken = diag.watchSent && !diag.watchReceived;
   const framesWithoutConfig = diag.binaryFrameCount > 0 && diag.videoConfigCount === 0;
@@ -936,9 +960,7 @@ export default function RemoteViewPage() {
         )}
       </div>
 
-      {/* ═══════════════════════════════════════════════════════════════════════ */}
-      {/* DIAGNOSTIC PANEL — shows exactly where the pipeline is broken       */}
-      {/* ═══════════════════════════════════════════════════════════════════════ */}
+      {/* Diagnostic Panel */}
       <div className="bg-gray-950 border border-gray-800 rounded-lg p-4 space-y-2 text-xs font-mono">
         <div className="flex items-center gap-2 text-gray-400 mb-2">
           <span className="text-yellow-500">⚑</span>
@@ -957,11 +979,10 @@ export default function RemoteViewPage() {
           ].map(item => (
             <div
               key={item.label}
-              className={`px-2 py-1.5 rounded ${
-                item.ok
-                  ? 'bg-green-500/10 text-green-400 border border-green-500/20'
-                  : 'bg-red-500/10 text-red-400 border border-red-500/20'
-              }`}
+              className={`px-2 py-1.5 rounded ${item.ok
+                ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                : 'bg-red-500/10 text-red-400 border border-red-500/20'
+                }`}
             >
               <div className="text-gray-500 text-[10px]">{item.label}</div>
               <div className="truncate">{item.value}</div>
@@ -974,26 +995,21 @@ export default function RemoteViewPage() {
           </div>
         )}
 
-        {/* Contextual diagnosis messages */}
         {handshakeBroken && (
           <div className="mt-2 p-2 bg-red-500/20 border border-red-500/40 rounded text-red-300">
             <strong>🔴 SERVER BUG DETECTED:</strong> Auth message was sent but server never responded with{' '}
             <code className="bg-gray-800 px-1 rounded">{"{status:'authenticated'}"}</code>.
-            <br />Check your <code className="bg-gray-800 px-1 rounded">/ws/viewer</code> handler — it must send this response after validating the adminKey.
           </div>
         )}
         {watchBroken && (
           <div className="mt-2 p-2 bg-red-500/20 border border-red-500/40 rounded text-red-300">
             <strong>🔴 SERVER BUG DETECTED:</strong> Watch message was sent but server never responded with{' '}
             <code className="bg-gray-800 px-1 rounded">{"{status:'watching'}"}</code>.
-            <br />Check your <code className="bg-gray-800 px-1 rounded">/ws/viewer</code> handler — it must register the viewer for the device and confirm.
           </div>
         )}
         {framesWithoutConfig && (
           <div className="mt-2 p-2 bg-red-500/20 border border-red-500/40 rounded text-red-300">
             <strong>🔴 SERVER BUG DETECTED:</strong> {diag.binaryFrameCount} binary frames received but 0 video_config messages.
-            <br />The server is forwarding video frames but NOT forwarding the video_config message from the device.
-            <br />Check your frame-forwarding logic — video_config must be sent to viewers before any binary data.
           </div>
         )}
       </div>
@@ -1103,22 +1119,36 @@ export default function RemoteViewPage() {
         </div>
       )}
 
-      {/* Video */}
+      {/* Video container with throttled input */}
       <div
         className="relative bg-black rounded-lg overflow-hidden border-2 border-gray-800 cursor-crosshair select-none mx-auto"
         style={{ aspectRatio: '1080 / 2336', maxWidth: '420px' }}
         onMouseDown={e => {
           const c = getCanvasCoords(e);
-          if (c && streaming) sendInput('touch_down', c.x, c.y);
+          if (c && streaming) {
+            sendInput('touch_down', c.x, c.y);
+            lastTouchCoordsRef.current = c;
+          }
         }}
         onMouseUp={e => {
+          cancelPendingMove();
           const c = getCanvasCoords(e);
-          if (c && streaming) sendInput('touch_up', c.x, c.y);
+          if (c && streaming) {
+            sendInput('touch_up', c.x, c.y);
+            lastTouchCoordsRef.current = null;
+          }
+        }}
+        onMouseLeave={e => {
+          cancelPendingMove();
+          if (streaming && lastTouchCoordsRef.current) {
+            sendInput('touch_up', lastTouchCoordsRef.current.x, lastTouchCoordsRef.current.y);
+            lastTouchCoordsRef.current = null;
+          }
         }}
         onMouseMove={e => {
           if (e.buttons !== 1) return;
           const c = getCanvasCoords(e);
-          if (c && streaming) sendInput('touch_move', c.x, c.y);
+          if (c && streaming) scheduleMove(c.x, c.y);
         }}
       >
         <canvas
@@ -1178,8 +1208,8 @@ export default function RemoteViewPage() {
           {wcOk === null
             ? '⏳ Verificando…'
             : wcOk
-            ? '✅ WebCodecs (nativo)'
-            : '❌ No soportado'}
+              ? '✅ WebCodecs (nativo)'
+              : '❌ No soportado'}
         </div>
         <div className="bg-gray-900 p-3 rounded-lg">
           <strong className="text-white block mb-1">Frames</strong>

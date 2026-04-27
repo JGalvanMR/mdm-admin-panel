@@ -11,7 +11,7 @@
     "module": "ESNext",
     "skipLibCheck": true,
     /* Tailwind stuff */
-    "baseUrl": ".",
+     "baseUrl": ".",
     "paths": {
       "@/*": [
         "./src/*"
